@@ -4,6 +4,8 @@
 #                                          player drops their own LSTONE.COM on first launch)
 #   ./make_app.sh --edition alan        -> dist/Alan Jones.app (family edition title screen)
 #   ./make_app.sh --with-game           -> also embed original/LSTONE.COM (private builds only)
+#   ./make_app.sh --binary PATH         -> package this binary instead of building one (the release
+#                                          workflow's universal build, arm64 + x86_64)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 # Python with Pillow for the icon and title logo: a project venv, created on first use.
@@ -19,10 +21,12 @@ else
 fi
 EDITION=release
 WITH_GAME=0
+BINARY=
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --edition) EDITION="$2"; shift 2 ;;
         --with-game) WITH_GAME=1; shift ;;
+        --binary) BINARY="$2"; shift 2 ;;
         *) echo "unknown option $1" >&2; exit 1 ;;
     esac
 done
@@ -33,13 +37,16 @@ case "$EDITION" in
 esac
 APP="$ROOT/dist/$NAME.app"
 
-cmake -S "$ROOT/remaster" -B "$ROOT/remaster/build-app" -DCMAKE_BUILD_TYPE=Release -DAPP_BUNDLE=ON \
-    -DWINDOW_TITLE="$NAME" >/dev/null
-cmake --build "$ROOT/remaster/build-app" -j
+if [[ -z "$BINARY" ]]; then
+    cmake -S "$ROOT/remaster" -B "$ROOT/remaster/build-app" -DCMAKE_BUILD_TYPE=Release -DAPP_BUNDLE=ON \
+        -DWINDOW_TITLE="$NAME" >/dev/null
+    cmake --build "$ROOT/remaster/build-app" -j
+    BINARY="$ROOT/remaster/build-app/livingstone"
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/assets"
-cp "$ROOT/remaster/build-app/livingstone" "$APP/Contents/MacOS/$EXE"
+cp "$BINARY" "$APP/Contents/MacOS/$EXE"
 for d in rooms sprites anim props shaders glow fonts; do
     cp -R "$ROOT/remaster/assets/$d" "$APP/Contents/Resources/assets/"
 done
@@ -66,9 +73,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>$EXE</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleShortVersionString</key><string>${APP_VERSION:-1.0}</string>
     <key>CFBundleVersion</key><string>1</string>
-    <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

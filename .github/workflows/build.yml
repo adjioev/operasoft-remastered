@@ -1,9 +1,12 @@
-# Windows and Linux builds, run for a v* tag (the archives go to its GitHub release) or by
+# Windows, Linux and macOS builds, run for a v* tag (the archives go to its GitHub release) or by
 # hand from the Actions tab (Run workflow: archives as workflow artifacts). Plain pushes
 # don't build.
 #   Windows: MSYS2 (UCRT64) with raylib and unicorn from pacman, their DLLs next to the exe.
 #   Linux:   raylib (static) and unicorn (shared, shipped next to the binary) built from source
 #            on the oldest supported Ubuntu, so the binary runs on older glibc too.
+#   macOS:   one universal app (arm64 + x86_64, macOS 11+): raylib built universal, unicorn built
+#            once per architecture and joined with lipo (both static), the .app made by
+#            make_app.sh and signed ad hoc (no Apple developer ID).
 name: build
 
 on:
@@ -144,3 +147,62 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: LivingstoneRemastered-linux-x86_64.tar.gz
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: raylib (static, universal)
+        run: |
+          command -v pkg-config || brew install pkgconf
+          git clone --depth 1 --branch 6.0 https://github.com/raysan5/raylib.git /tmp/raylib
+          cmake -S /tmp/raylib -B /tmp/raylib/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_EXAMPLES=OFF -DPLATFORM=Desktop -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_INSTALL_PREFIX=/tmp/rl
+          cmake --build /tmp/raylib/build -j --target install
+
+      - name: unicorn (x86 only, static, universal)
+        # Unicorn takes its code generator's host from the compiler's own macros (not from the
+        # architecture flags), so the x86_64 half is built with a compiler that is x86_64 itself
+        run: |
+          git clone --depth 1 --branch 2.1.4 https://github.com/unicorn-engine/unicorn.git /tmp/unicorn
+          printf '#!/bin/sh\nexec /usr/bin/clang -arch x86_64 "$@"\n' > /tmp/cc-x64 && chmod +x /tmp/cc-x64
+          COMMON="-DCMAKE_BUILD_TYPE=Release -DUNICORN_ARCH=x86 -DUNICORN_BUILD_TESTS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
+          ARCHFLAGS="-arch arm64" cmake -S /tmp/unicorn -B /tmp/uc-arm $COMMON -DCMAKE_INSTALL_PREFIX=/tmp/uc
+          cmake --build /tmp/uc-arm -j
+          ARCHFLAGS="-arch x86_64" cmake -S /tmp/unicorn -B /tmp/uc-x64 $COMMON \
+            -DCMAKE_C_COMPILER=/tmp/cc-x64 -DCMAKE_OSX_ARCHITECTURES=x86_64
+          cmake --build /tmp/uc-x64 -j
+          grep HOST_AARCH64 /tmp/uc-arm/config-host.h && grep HOST_X86_64 /tmp/uc-x64/config-host.h
+          cmake --install /tmp/uc-arm
+          lipo -create /tmp/uc-arm/libunicorn.a /tmp/uc-x64/libunicorn.a -output /tmp/uc/lib/libunicorn.a
+          rm -f /tmp/uc/lib/libunicorn*.dylib
+          lipo -info /tmp/uc/lib/libunicorn.a
+
+      - name: Build
+        run: |
+          PKG_CONFIG_PATH=/tmp/rl/lib/pkgconfig:/tmp/uc/lib/pkgconfig cmake -S remaster -B build \
+            -DCMAKE_BUILD_TYPE=Release -DAPP_BUNDLE=ON -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build -j
+          lipo -info build/livingstone
+          otool -L build/livingstone
+
+      - name: Package
+        run: |
+          python3 -m venv /tmp/py && /tmp/py/bin/pip install -q pillow  # (the icon)
+          VERSION="${{ github.ref_name }}"
+          APP_VERSION="${VERSION#v}" PYTHON=/tmp/py/bin/python ./make_app.sh --binary build/livingstone
+          cd dist && ditto -c -k --keepParent "Livingstone Remastered.app" ../LivingstoneRemastered-macos.zip
+          ls -la ../LivingstoneRemastered-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LivingstoneRemastered-macos
+          path: LivingstoneRemastered-macos.zip
+
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LivingstoneRemastered-macos.zip
